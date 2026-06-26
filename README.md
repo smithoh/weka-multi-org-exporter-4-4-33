@@ -175,27 +175,22 @@ curl -s http://localhost:8002/metrics | grep '^weka_fs'   # org2
 
 `weka_fs_stats` only carries data while the filesystem has I/O — mount the Org's filesystem and run a workload to see it populate.
 
-## 6. Prometheus & Grafana Integration (planned task)
+## 6. Prometheus, Grafana & Loki Integration (implemented)
 
-> **Not yet executed — this is the next planned exercise.** Intended layout:
-> - **client-0** runs the per-Org **exporters** (this guide).
-> - **client-1** runs an **external Prometheus** (scraping the exporters) and an **external Grafana** (per-Org dashboards).
+A full **per-Org-isolated** monitoring stack has been built and validated (WEKA v4.4.33): each Org gets its own Prometheus + Grafana (metrics) and its own Loki (events), all fed from the per-Org exporters. See the dedicated deployment guide:
 
-Planned Prometheus scrape config (one job per Org):
+➡️ **[multi-org-monitoring-deployment.md](multi-org-monitoring-deployment.md)**
 
-```yaml
-scrape_configs:
-  - job_name: weka-org1
-    static_configs:
-      - targets: ['<client-0>:8001']
-        labels: { org: org1 }
-  - job_name: weka-org2
-    static_configs:
-      - targets: ['<client-0>:8002']
-        labels: { org: org2 }
-```
+Layout (validated on `smith-25`):
+- **client-0** — per-Org exporters (`:8001` org1, `:8002` org2)
+- **client-1 / client-2** — external Prometheus + Grafana, one per Org
+- **client-3 / client-4** — external Loki, one per Org (exporter pushes events here)
 
-Grafana: add the external Prometheus as a data source and build per-Org panels keyed on `fs_name` / the `org` label (e.g. `weka_fs_stats{stat="READS"}`). The detailed external-Prometheus + external-Grafana walkthrough will be added once the task is completed and validated.
+Two data flows, isolated per tenant:
+- **Metrics**: exporter → Prometheus (per Org) → Grafana → `Weka_FS` / `Weka_Cluster_Overview` etc.
+- **Events**: exporter → Loki (per Org) → Grafana → `Weka_Logs`
+
+Full node-by-node procedure, config snippets, and verification results are in the deployment guide above.
 
 ## 7. Troubleshooting
 
