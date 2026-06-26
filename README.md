@@ -1,7 +1,7 @@
 # WEKA Multi-Org Exporter — Overview & Configuration Guide
 
 > **Status: DRAFT.** Fact-based draft for review before wider distribution (team / tools repository).
-> A full, version-specific validation runbook is in [validation-report-v4.4.33.md](validation-report-v4.4.33.md).
+> Step-by-step deployment is in the [deployment runbook](multi-org-monitoring-deployment.md).
 
 ## TL;DR
 
@@ -103,7 +103,7 @@ The full catalog of categories/statistics is in WEKA's [list of statistics](http
 
 ## 5. Configuration
 
-> The exact, verified files are in the validation report's [Appendix A](validation-report-v4.4.33.md#appendix-a-configuration-files-used). This section is the generalized procedure.
+> This section is the generalized procedure. The complete exporter config files and Docker Compose are in the [deployment runbook](multi-org-monitoring-deployment.md) (§4).
 
 ### 5.1 Generate a per-Org auth token
 
@@ -210,8 +210,6 @@ The runbook above has the exact install commands and the edited parameters per c
 
 - WEKA `v4.4.10.171` — validated (stable across a 30-minute workload).
 - WEKA `v4.4.33` — validated on three independent fresh deployments (stable; per-Org separation and workload direction correct).
-
-Details, sample metric output, and the exact configuration files: [validation-report-v4.4.33.md](validation-report-v4.4.33.md).
 
 ## 10. References
 

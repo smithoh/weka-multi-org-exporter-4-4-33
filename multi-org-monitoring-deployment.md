@@ -4,7 +4,7 @@
 >
 > **"External" = natively installed on the OS** (Grafana via the official yum repo; Prometheus and Loki via official release binaries + `systemd`) — **not** the bundled `weka-mon` Docker stack. Only the WEKA **exporter** stays as a container.
 >
-> Validated on **WEKA v4.4.33** (cluster `smith-25`). Exporter validation: [validation-report-v4.4.33.md](validation-report-v4.4.33.md).
+> Validated on **WEKA v4.4.33** (cluster `smith-25`).
 
 ## 1. Node Layout
 
