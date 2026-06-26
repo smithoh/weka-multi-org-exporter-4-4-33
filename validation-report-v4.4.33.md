@@ -133,7 +133,7 @@ stats:
 
 ### 4.5 Docker Compose Configuration
 
-The full file is in **Appendix A.3**. Both services use container-internal port `8001`; the host ports `8001`/`8002` are separated by the `ports` mapping. Each service uses `command: -v` (the per-Org config is bind-mounted onto the default path `/weka/export.yml`). This compose does **not** set `user: "0:0"`, so the container runs as its default user and relies on the token files being `chmod 644` (see §4.2). It is derived from the stock weka-mon `docker-compose.yml` with the `grafana`/`loki`/`prometheus`/`alertmanager`/`quota-export` services commented out.
+The full file is in **Appendix A.3**. It defines only the two exporter services (one per Org). Both use container-internal port `8001`; the host ports `8001`/`8002` are separated by the `ports` mapping. Each service uses `command: -v` (the per-Org config is bind-mounted onto the default path `/weka/export.yml`). This compose does **not** set `user: "0:0"`, so the container runs as its default user and relies on the token files being `chmod 644` (see §4.2).
 
 ### 4.6 Run the Exporters
 
@@ -343,7 +343,7 @@ cluster:
 
 ### A.3 `docker-compose.yml`
 
-This is derived from the stock weka-mon `docker-compose.yml`: the `grafana`, `loki`, `prometheus`, `alertmanager`, and `quota-export` services are commented out, leaving only the two exporter services active. Both use `command: -v` (the per-Org config is bind-mounted onto the default path `/weka/export.yml`, so no explicit `-c` is needed). There is **no** `user: "0:0"` — the container runs as its default user and reads the `chmod 644` token files (see §4.2).
+Only the two exporter services are defined (one per Org). Both use `command: -v` (the per-Org config is bind-mounted onto the default path `/weka/export.yml`, so no explicit `-c` is needed). There is **no** `user: "0:0"` — the container runs as its default user and reads the `chmod 644` token files (see §4.2).
 
 ```yaml
 services:

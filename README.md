@@ -5,9 +5,9 @@
 
 ## TL;DR
 
-WEKA's external monitoring stack ([WEKAmon](https://docs.weka.io/monitor-the-weka-cluster/external-monitoring)) ships a single **exporter** that reports **cluster-wide** metrics. In a **multi-Organization (multi-tenant)** cluster, that single exporter cannot give each tenant a view limited to *their own* Organization's filesystems.
+The WEKA Prometheus exporter container (`wekasolutions/export`) reports **cluster-wide** metrics by default. In a **multi-Organization (multi-tenant)** cluster, a single exporter cannot give each tenant a view limited to *their own* Organization's filesystems.
 
-The **Multi-Org Exporter** pattern solves this by running **one exporter container per Organization**, each authenticated with that Org's own token. The exporter binary and configuration are exactly the same as WEKAmon's — we simply **run the exporter container standalone, once per Org**, on different ports. Each instance then exposes per-filesystem capacity and I/O metrics (with `fs_id` / `fs_name` labels) scoped to a single Org, ready for per-tenant Prometheus scraping and Grafana dashboards.
+The **Multi-Org Exporter** pattern solves this by running **one exporter container per Organization**, each authenticated with that Org's own token, on a different port. Each instance then exposes per-filesystem capacity and I/O metrics (with `fs_id` / `fs_name` labels) scoped to a single Org, ready for per-tenant Prometheus scraping and Grafana dashboards.
 
 ---
 
@@ -15,7 +15,7 @@ The **Multi-Org Exporter** pattern solves this by running **one exporter contain
 
 WEKA supports **Organizations** for multi-tenancy: tenants are isolated and an Org admin can only see their own Org's resources.
 
-The standard WEKAmon exporter, however, is designed for a **single, cluster-wide** view:
+The exporter, however, is designed for a **single, cluster-wide** view:
 
 - It logs into the cluster with one identity and reports metrics for the whole cluster.
 - Giving each tenant a Grafana view restricted to *their* filesystems is not achievable from a single shared exporter instance.
@@ -24,7 +24,7 @@ Teams and customers running multi-Org clusters (e.g. Coupang, and others raising
 
 ## 2. The Solution — one exporter per Org
 
-The base architecture is identical to WEKAmon's exporter; the only change is **how it is deployed**: the exporter container is **detached from the bundled stack and run once per Organization**, each with:
+Only the **deployment** changes: run the exporter container **once per Organization**, each with:
 
 - a dedicated **Org auth token** (the exporter logs into the cluster as that Org's admin → it only sees that Org's filesystems), and
 - a dedicated **host port** (e.g. 8001 for org1, 8002 for org2).
@@ -222,7 +222,7 @@ Details, sample metric output, and the exact configuration files: [validation-re
 
 ## 10. References
 
-- WEKA External Monitoring (WEKAmon): https://docs.weka.io/monitor-the-weka-cluster/external-monitoring
+- WEKA external monitoring documentation: https://docs.weka.io/monitor-the-weka-cluster/external-monitoring
 - WEKA list of statistics: https://docs.weka.io/usage/statistics/list-of-statistics
 - Exporter image: `wekasolutions/export`
 
