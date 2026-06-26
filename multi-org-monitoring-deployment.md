@@ -379,6 +379,83 @@ Grafana → **Weka Cluster Overview → scroll to bottom → "Network (custom)"*
 
 **Takeaway:** dashboard visibility = (1) `stats:` enables collection → (2) Prometheus scrapes → (3) **a panel must query it**. Steps 1–2 are necessary but not sufficient; step 3 is what puts the metric on screen. (This is why enabling `ssd` alone showed nothing — no bundled panel queries it.)
 
+### 8.4 Build a brand-new custom dashboard (per-Org filesystem I/O)
+
+§8.2 adds a panel to an *existing* dashboard. This builds a **standalone dashboard** from scratch — the right approach for the multi-Org headline view: **per-filesystem I/O from `weka_fs_stats`** (the metric that has `fs_id`/`fs_name` and is **not** used by any bundled dashboard). The *same* dashboard JSON is deployed to both Org Grafanas; each shows only its own Org's filesystem because each reads only its own Org's Prometheus.
+
+Provision it like any other dashboard: drop a JSON file into `/var/lib/grafana/dashboards/` (the file provider in §6 auto-loads it).
+
+Dashboard essentials:
+- Give it a unique `uid` (e.g. `perorgfsio`) and a `title`.
+- Add a `datasource` **template variable** of `type: datasource`, `query: prometheus` (named `weka_datasource`, matching the bundled dashboards), and reference it in every panel/target as `{"uid": "$weka_datasource"}`. This auto-binds to the provisioned Prometheus without hardcoding a uid.
+- One `timeseries` panel per metric family, querying `weka_fs_stats` by `fs_name`.
+
+Panels and queries:
+
+| Panel | unit | targets (`expr` → `legendFormat`) |
+|---|---|---|
+| IOPS by filesystem | `iops` | `weka_fs_stats{stat="READS"}` → `{{fs_name}} READS` ; `weka_fs_stats{stat="WRITES"}` → `{{fs_name}} WRITES` |
+| Throughput by filesystem | `Bps` | `weka_fs_stats{stat="READ_BYTES"}` ; `weka_fs_stats{stat="WRITE_BYTES"}` |
+| Latency by filesystem | `µs` | `weka_fs_stats{stat="READ_LATENCY"}` ; `weka_fs_stats{stat="WRITE_LATENCY"}` |
+
+Minimal dashboard skeleton (one panel shown; repeat for the other two):
+
+```json
+{
+  "uid": "perorgfsio",
+  "title": "Per-Org Filesystem IO",
+  "tags": ["weka","multi-org","custom"],
+  "schemaVersion": 39, "version": 1, "refresh": "10s",
+  "time": {"from": "now-30m", "to": "now"},
+  "templating": {"list": [
+    {"name":"weka_datasource","type":"datasource","query":"prometheus","refresh":1,"current":{}}
+  ]},
+  "panels": [
+    {"id":1,"type":"row","title":"Per-Org Filesystem I/O (weka_fs_stats)","gridPos":{"h":1,"w":24,"x":0,"y":0}},
+    {"id":2,"type":"timeseries","title":"IOPS by filesystem (READS / WRITES)",
+     "datasource":{"uid":"$weka_datasource"},
+     "gridPos":{"h":8,"w":24,"x":0,"y":1},
+     "fieldConfig":{"defaults":{"unit":"iops"},"overrides":[]},
+     "targets":[
+       {"refId":"A","datasource":{"uid":"$weka_datasource"},"expr":"weka_fs_stats{stat=\"READS\"}","legendFormat":"{{fs_name}} READS"},
+       {"refId":"B","datasource":{"uid":"$weka_datasource"},"expr":"weka_fs_stats{stat=\"WRITES\"}","legendFormat":"{{fs_name}} WRITES"}
+     ]}
+  ]
+}
+```
+
+Deploy to each Org Grafana (identical file):
+
+```bash
+scp perorg_fsio.json smith_oh@<C1>:/tmp/      # and <C2>
+# on each node:
+cp /tmp/perorg_fsio.json /var/lib/grafana/dashboards/Per_Org_Filesystem_IO.json
+chown grafana:grafana /var/lib/grafana/dashboards/Per_Org_Filesystem_IO.json
+systemctl restart grafana-server
+```
+
+Verify (per Org):
+
+```bash
+curl -s "http://admin:Passw0rd!@localhost:3000/api/dashboards/uid/perorgfsio" | grep -c '"Per-Org Filesystem IO"'
+curl -s -G http://localhost:9090/api/v1/query --data-urlencode 'query=weka_fs_stats'
+```
+
+Validated on smith-25 under FIO load (org1 random read / org2 random write):
+
+| | client-1 (org1) | client-2 (org2) |
+|---|---|---|
+| Dashboard `perorgfsio` | loaded | loaded |
+| Filesystem shown | **org1fs1 only** | **org2fs1 only** |
+| READS | ~55,000 iops | 0 |
+| WRITES | 0 | ~40,000 iops |
+| READ_LATENCY | ~1.8 ms | 0 |
+| WRITE_LATENCY | 0 | ~2.5 ms |
+
+→ proves the multi-Org headline value: each tenant's Grafana shows **only its own filesystem's per-fs I/O**, drawn from `weka_fs_stats`. Keep a workload running while building/observing — `weka_fs_stats` is empty without I/O.
+
+> **Two ways to add visualizations** (both in this runbook): **§8.2** = append a panel to an existing dashboard JSON; **§8.4** = ship a whole new dashboard JSON. Both are just files under `/var/lib/grafana/dashboards/` picked up by the file provider.
+
 ## 9. Operations Notes
 
 - **Bring-up order:** Loki (client-3/4) → exporters (client-0, push to those Loki) → Prometheus + Grafana (client-1/2).
