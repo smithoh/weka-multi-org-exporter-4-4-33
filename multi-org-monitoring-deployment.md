@@ -311,7 +311,75 @@ Grafana UI: `http://<C1>:3000` (org1) / `http://<C2>:3000` (org2), login `admin`
 
 With an FIO workload (org1 random read / org2 random write), `weka_fs_stats` populates per Org in each Prometheus, and the exporter's events appear in each Org's Loki — visible in that Org's Grafana (metrics dashboards + `Weka Logs`). Neither Org's stack references the other's data.
 
-## 8. Operations Notes
+## 8. Worked example — enable an extra metric and surface it on a dashboard
+
+Enabling a stat in `stats:` makes the exporter/Prometheus **collect** it, but it only **appears on a dashboard if a panel queries it**. The bundled dashboards query only `cpu` / `ops` / `ops_driver(RDMA)` / `ops_nfs` from `weka_stats` (plus `weka_fs`, `weka_overview_*`, etc.) — they do **not** query `category=ssd` or `category=network`. So enabling those alone changes nothing on screen; you must add a panel. Full A→B example using `network / PUMPS_TXQ_FULL`.
+
+### 8.1 (A) Enable the metric in the exporter config
+
+On client-0, add the category/stat to each `export-orgN.yml` `stats:` section:
+
+```yaml
+stats:
+  # ... existing categories ...
+  network:
+    PUMPS_TXQ_FULL: times
+```
+
+Restart and verify it reaches the exporter — note `PUMPS_TXQ_FULL` only increments under **network TX-queue pressure**, so it needs an active workload to show non-zero (with no I/O the series may be absent):
+
+```bash
+cd /opt/weka-mon && docker compose -f docker-compose-export.yml restart
+curl -s http://localhost:8001/metrics | grep PUMPS_TXQ_FULL          # appears under load
+# confirm in Prometheus (on client-1/2):
+curl -s -G http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=count(weka_stats{category="network",stat="PUMPS_TXQ_FULL"})'
+```
+
+### 8.2 (B) Add a custom panel to a provisioned dashboard
+
+Provisioned dashboards are JSON files under `/var/lib/grafana/dashboards/` (here `Weka_Cluster_Overview.json`, uid `WekaOverview`). Append a panel to the top-level `panels` array; Grafana re-imports on reload.
+
+Panel essentials:
+- `datasource: {"uid": "$weka_datasource"}` — reuse the dashboard's datasource template variable (don't hardcode a name)
+- `gridPos.y` = below the current bottom panel (so it lands at the end)
+- `targets[].expr` = the new metric, using the dashboard's `$cluster` variable
+
+```json
+{ "id": 109, "type": "row", "title": "Network (custom)", "collapsed": false,
+  "gridPos": {"h":1,"w":24,"x":0,"y":159} },
+{ "id": 110, "type": "timeseries", "title": "Network: PUMPS_TXQ_FULL by host (custom)",
+  "datasource": {"uid": "$weka_datasource"},
+  "gridPos": {"h":9,"w":24,"x":0,"y":160},
+  "targets": [{ "refId":"A", "datasource":{"uid":"$weka_datasource"},
+    "expr":"weka_stats{cluster=\"$cluster\", category=\"network\", stat=\"PUMPS_TXQ_FULL\"}",
+    "legendFormat":"{{host_name}} {{node_role}}" }] }
+```
+
+Apply on each Grafana node (client-1/2):
+
+```bash
+chown grafana:grafana /var/lib/grafana/dashboards/Weka_Cluster_Overview.json
+systemctl restart grafana-server      # or wait for the file provider to reload
+```
+
+> Rather than hand-editing a 60+ panel JSON, we used a small Python script that loads the file, computes the next `id` and the current bottom `y` (max `gridPos.y + h`), appends the row + timeseries, and writes it back. This avoids breaking the existing layout.
+
+### 8.3 Verify on the dashboard
+
+```bash
+# panel present in the dashboard model:
+curl -s "http://admin:Passw0rd!@localhost:3000/api/dashboards/uid/WekaOverview" | grep -c "PUMPS_TXQ_FULL"
+# data queryable (per Org):
+curl -s -G http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=count(weka_stats{category="network",stat="PUMPS_TXQ_FULL"})'
+```
+
+Grafana → **Weka Cluster Overview → scroll to bottom → "Network (custom)"** shows `PUMPS_TXQ_FULL` per host (rises under workload). Validated on smith-25: panel present on both Org Grafanas, **20 series per Org**, values ~0.5–3 M `times` during a heavy FIO run.
+
+**Takeaway:** dashboard visibility = (1) `stats:` enables collection → (2) Prometheus scrapes → (3) **a panel must query it**. Steps 1–2 are necessary but not sufficient; step 3 is what puts the metric on screen. (This is why enabling `ssd` alone showed nothing — no bundled panel queries it.)
+
+## 9. Operations Notes
 
 - **Bring-up order:** Loki (client-3/4) → exporters (client-0, push to those Loki) → Prometheus + Grafana (client-1/2).
 - **Service mgmt (native):** `systemctl status|restart loki|prometheus|grafana-server`; logs via `journalctl -u <svc>`.
