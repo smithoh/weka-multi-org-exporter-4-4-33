@@ -1,384 +1,233 @@
-# WEKA Multi-Org Exporter Configuration and Validation Report — WEKA v4.4.33
+# WEKA Multi-Org Exporter — Overview & Configuration Guide
 
-> **Validation summary — PASSED (validated twice).** The full procedure in this report was run end to end **two independent times on freshly deployed WEKA `v4.4.33` clusters**, and both runs completed with no issues. In both runs, `weka_fs` (capacity), per-Org separation, and `weka_fs_stats` (per-filesystem I/O) were emitted correctly and remained **stable across the entire 30-minute workload** (sampled at 2 / 5 / 10 / 15 / 22 / 25 / 28 minutes — 6 series per Org at every point, zero `node-host` errors). v4.4.33 behaves equivalently to v4.4.10.171.
+> **Status: DRAFT.** Fact-based draft for review before wider distribution (team / tools repository).
+> A full, version-specific validation runbook is in [validation-report-v4.4.33.md](validation-report-v4.4.33.md).
 
-## 1. Overview
+## TL;DR
 
-This report is a complete runbook for configuring per-Organization (hereafter "Org") Exporters on WEKA `v4.4.33` and validating that per-Org filesystem capacity and I/O statistics are collected correctly in Prometheus format, using the `wekasolutions/export:20260216` image.
+WEKA's external monitoring stack ([WEKAmon](https://docs.weka.io/monitor-the-weka-cluster/external-monitoring)) ships a single **exporter** that reports **cluster-wide** metrics. In a **multi-Organization (multi-tenant)** cluster, that single exporter cannot give each tenant a view limited to *their own* Organization's filesystems.
 
-`org1` and `org2` were separated into independent authentication tokens and Exporter instances. Both the capacity metric (`weka_fs`) and the per-filesystem I/O statistics metric (`weka_fs_stats`) were confirmed to be emitted correctly and **stably throughout a 30-minute workload**, with per-Org separation. v4.4.33 behaves equivalently to the the v4.4.10.171 validation.
+The **Multi-Org Exporter** pattern solves this by running **one exporter container per Organization**, each authenticated with that Org's own token. The exporter binary and configuration are exactly the same as WEKAmon's — we simply **run the exporter container standalone, once per Org**, on different ports. Each instance then exposes per-filesystem capacity and I/O metrics (with `fs_id` / `fs_name` labels) scoped to a single Org, ready for per-tenant Prometheus scraping and Grafana dashboards.
 
-## 2. Validation Goals
+---
 
-- Run per-Org Exporters independently using per-Org authentication tokens.
-- Confirm each Exporter only sees its own Org's filesystem.
-- Confirm `weka_fs` (capacity) is emitted correctly.
-- Confirm `weka_fs_stats` (per-filesystem IOPS, throughput, latency) is emitted correctly and remains stable under sustained workload.
-- Validate compatibility between WEKA `v4.4.33` and Exporter image `20260216`.
+## 1. The Problem
 
-## 3. Validation Environment
+WEKA supports **Organizations** for multi-tenancy: tenants are isolated and an Org admin can only see their own Org's resources.
 
-| Item | Setting |
+The standard WEKAmon exporter, however, is designed for a **single, cluster-wide** view:
+
+- It logs into the cluster with one identity and reports metrics for the whole cluster.
+- Giving each tenant a Grafana view restricted to *their* filesystems is not achievable from a single shared exporter instance.
+
+Teams and customers running multi-Org clusters (e.g. Coupang, and others raising the same need) want **per-Org dashboards** — each tenant sees only their filesystems' capacity, IOPS, throughput, and latency.
+
+## 2. The Solution — one exporter per Org
+
+The base architecture is identical to WEKAmon's exporter; the only change is **how it is deployed**: the exporter container is **detached from the bundled stack and run once per Organization**, each with:
+
+- a dedicated **Org auth token** (the exporter logs into the cluster as that Org's admin → it only sees that Org's filesystems), and
+- a dedicated **host port** (e.g. 8001 for org1, 8002 for org2).
+
+```
+                         WEKA cluster (mgmt API :14000)
+                          ├─ Org1 (org1fs1 ...)
+                          └─ Org2 (org2fs1 ...)
+                                   ▲           ▲
+              org1 token ──────────┘           └────────── org2 token
+                                   │           │
+  ┌───────────────────────────────┴───┐  ┌────┴──────────────────────────────┐
+  │ export-org1  (container)           │  │ export-org2  (container)          │
+  │   /weka/export.yml = export-org1.yml│  │   /weka/export.yml = export-org2.yml│
+  │   listens :8001                     │  │   listens :8001                    │
+  └───────────────┬─────────────────────┘  └──────────────┬────────────────────┘
+       host :8001 │                                host :8002
+                  ▼                                       ▼
+          /metrics (org1 only)                    /metrics (org2 only)
+                  └───────────────┬───────────────────────┘
+                                  ▼
+                           Prometheus (scrape job per Org)
+                                  ▼
+                              Grafana (per-Org dashboards)
+```
+
+Both containers listen on `8001` internally; the host ports `8001`/`8002` separate them via Docker port mapping.
+
+## 3. Prerequisites & Compatibility
+
+| Item | Notes |
 |---|---|
-| WEKA version | `v4.4.33` |
-| Exporter image | `wekasolutions/export:20260216` |
-| Exporter run method | Docker Compose |
-| Cluster | 6 backends + 6 clients |
-| Org 1 | `org1` / admin `org1admin` |
-| Org 1 filesystem | `org1fs1` (`fs_id=2`, 111 GB) |
-| Org 1 Exporter port | `8001` |
-| Org 2 | `org2` / admin `org2admin` |
-| Org 2 filesystem | `org2fs1` (`fs_id=3`, 222 GB) |
-| Org 2 Exporter port | `8002` |
-| Exporter host | a WEKA client node (Docker installed) |
-| Backend management IP | `<WEKA_MANAGEMENT_IP>` (port `14000`) |
+| Exporter image | `wekasolutions/export` — see version note below |
+| Host | Any host with Docker + network reach to a WEKA backend management IP (`:14000`); typically a WEKA client node |
+| WEKA Organizations | `org1`, `org2`, … created, each with an admin user and at least one filesystem |
+| Per-Org auth tokens | One token file per Org (§5.1) |
 
-> Actual passwords and token values are not included in this report.
+**Exporter image / WEKA version compatibility** (validated by us):
 
-## 4. Configuration Procedure
+| WEKA version | Image | per-fs `weka_fs_stats` | Status |
+|---|---|---|---|
+| 4.4.10.171 | `wekasolutions/export:20260216` | OK | ✅ validated |
+| 4.4.33 | `wekasolutions/export:20260216` | OK | ✅ validated (3 independent deployments) |
+| 5.1.0 | (exporter originally written against 5.1.0 API) | OK | per upstream |
 
-### 4.1 Generate Per-Org Authentication Tokens
+> The per-filesystem stats collection differs between the WEKA 4.4.x line and 5.1.0 APIs. The `20260216` image carries the 4.4.x compatibility handling and is the recommended image for 4.4.x clusters. Always re-validate the exact image against the exact WEKA build you deploy.
 
-Log in with each Org's admin account to generate a separate authentication token file. This can be run on a backend, or on the Exporter host pointing at a backend management IP with `-H`.
+## 4. Metrics Exposed
+
+Each per-Org exporter exposes, on its `/metrics` endpoint:
+
+| Metric | Type | Key labels | Meaning |
+|---|---|---|---|
+| `weka_fs` | gauge | `cluster`, `name`, `stat` | Per-filesystem **capacity** (`available_total`, `used_total`, `available_ssd`, `used_ssd`, `total_percent_used`, `ssd_percent_used`) |
+| `weka_fs_stats` | gauge | `cluster`, `fs_id`, `fs_name`, `stat`, `unit` | Per-filesystem **I/O** (`READS`, `READ_BYTES`, `READ_LATENCY`, `THROUGHPUT`, `WRITES`, `WRITE_BYTES`, `WRITE_LATENCY`) |
+| `weka_stats` | gauge | `category`, `stat`, `unit`, host labels | General WEKA statistics selected via the config `stats:` section |
+
+`fs_id` / `fs_name` on `weka_fs_stats` are what make per-filesystem (and therefore per-Org) breakdown possible.
+
+### 4.1 How the `stats:` section relates to `weka stats`
+
+The `stats:` section of `export.yml` is a **whitelist that selects which WEKA statistics the exporter scrapes and publishes**. Each entry maps directly to a `weka stats` category/statistic — the stock template states this explicitly: *"if you are familiar with 'weka stats', these are `--category <category> --stat <statistic>`."*
+
+Example mapping (the entries used for `weka_fs_stats`):
+
+| `export.yml` (`stats:`) | Equivalent `weka stats` query | Published as |
+|---|---|---|
+| `ops: READS` | `weka stats --category ops --stat READS` | `weka_fs_stats{...,stat="READS",unit="iops"}` |
+| `ops: READ_BYTES` | `weka stats --category ops --stat READ_BYTES` | `...stat="READ_BYTES",unit="bytespersec"` |
+| `ops: READ_LATENCY` | `weka stats --category ops --stat READ_LATENCY` | `...stat="READ_LATENCY",unit="microsecs"` |
+| `ops: THROUGHPUT` | `weka stats --category ops --stat THROUGHPUT` | `...stat="THROUGHPUT",unit="bytespersec"` |
+| `ops: WRITES / WRITE_BYTES / WRITE_LATENCY` | `weka stats --category ops --stat WRITE*` | `...stat="WRITE*"` |
+| `cpu: CPU_UTILIZATION` | `weka stats --category cpu --stat CPU_UTILIZATION` | `weka_stats{category="cpu",...}` |
+
+The full catalog of categories/statistics is in WEKA's [list of statistics](https://docs.weka.io/usage/statistics/list-of-statistics). The exporter only emits the entries you uncomment in `stats:`.
+
+> **TODO (next validation cluster):** capture a live 1:1 diff — run `weka stats --category ops --stat READS ...` on a backend and compare the values/units against the exporter's `weka_fs_stats` output at the same moment, to document the exact correspondence and any aggregation the exporter applies.
+
+## 5. Configuration
+
+> The exact, verified files are in the validation report's [Appendix A](validation-report-v4.4.33.md#appendix-a-configuration-files-used). This section is the generalized procedure.
+
+### 5.1 Generate a per-Org auth token
 
 ```bash
-weka user login org1admin '<ORG1_PASSWORD>' --org org1 \
-  -H <WEKA_MANAGEMENT_IP> --path /opt/weka-mon/.weka/org1-authtoken.json
-
-weka user login org2admin '<ORG2_PASSWORD>' --org org2 \
-  -H <WEKA_MANAGEMENT_IP> --path /opt/weka-mon/.weka/org2-authtoken.json
+weka user login <orgNadmin> '<PASSWORD>' --org <orgN> \
+  -H <WEKA_MANAGEMENT_IP> --path /opt/weka-mon/.weka/<orgN>-authtoken.json
 ```
 
-On success:
+The exporter logs into the cluster using this token, so it only sees that Org's filesystems.
 
-```text
-+------------------------------+
-| Login completed successfully |
-+------------------------------+
-Default profile updated successfully
-```
-
-### 4.2 Place the Authentication Tokens (and fix permissions)
-
-The token files must live under `/opt/weka-mon/.weka` on the Exporter host, and **must be readable by the Exporter container**.
+### 5.2 Place the token and fix permissions
 
 ```bash
-mkdir -p /opt/weka-mon/.weka
-# (if generated elsewhere, move them here)
-
-# IMPORTANT: `weka user login --path` creates the token files as mode 0600 owned by root.
-# The wekasolutions/export container runs as a NON-root user, so with 0600 it cannot
-# read the token and fails with:
-#     CRITICAL:Unable to ... Permission denied: '/weka/.weka/org1-authtoken.json'
-# and the container falls into a restart loop. Make the files container-readable:
 chmod 644 /opt/weka-mon/.weka/*.json
 ```
 
-Resulting layout:
+> `weka user login --path` writes the token as `0600 root`. The exporter container runs as a non-root user, so with `0600` it cannot read the token and restart-loops with `Permission denied`. Fix with `chmod 644` **or** run the container as root (`user: "0:0"` in `docker-compose.yml`). Prefer `user: "0:0"` in production over world-readable credentials.
 
-```text
-/opt/weka-mon/.weka/
-├── org1-authtoken.json   # 644
-└── org2-authtoken.json   # 644
-```
+### 5.3 Per-Org config file (`export-orgN.yml`)
 
-> **Two ways to resolve the `0600` permission problem** — use either one:
-> - `chmod 644 /opt/weka-mon/.weka/*.json` (shown above; **used in this validation** — the `docker-compose.yml` in Appendix A.3 does not set `user`), **or**
-> - Run the Exporter container as root by adding `user: "0:0"` to each service in `docker-compose.yml`.
->
-> For a production setup, prefer running the container as root (`user: "0:0"`) over world-readable `644` credentials.
-
-### 4.3 Verify the Org Information in the Token
-
-Optionally inspect the JWT payload to confirm each token is for the correct Org and user.
-
-```bash
-jq -r .access_token /opt/weka-mon/.weka/org1-authtoken.json \
-  | cut -d. -f2 | tr '_-' '/+' | awk '{print $0 "=="}' | base64 -d
-```
-
-The `org1` token should show:
-
-```json
-{ "sub": { "org_id": 1, "role": "OrgAdminUser", "source": "Internal", "username": "org1admin" } }
-```
-
-The `org2` token should show `org_id=2`, `username=org2admin`.
-
-> A trailing `base64: invalid input` message may appear due to Base64 padding; the JSON payload above it is still valid.
-
-### 4.4 Write Per-Org Exporter Configuration Files
-
-Create a separate config file per Org. The complete files are in **Appendix A.1 / A.2**.
-
-> **Required: the `stats:` section.** The config file must contain a `stats:` section (`cpu`, `ops`, `ops_driver`, ...). The Exporter reads `config['stats']` at startup; if it is missing the process aborts with `KeyError: 'stats'` and the container restart-loops. The per-filesystem `weka_fs_stats` series (`READS`, `READ_BYTES`, `READ_LATENCY`, `THROUGHPUT`, `WRITES`, `WRITE_BYTES`, `WRITE_LATENCY`) come from the `ops` category.
-
-Key fields per Org (full file in Appendix A):
+Key fields (full file in Appendix A):
 
 ```yaml
 exporter:
-  listen_port: 8001          # container-internal port (fixed); host side differs via ports mapping
-
+  listen_port: 8001          # container-internal port (same for all Orgs)
 cluster:
-  auth_token_file: org1-authtoken.json   # org2-authtoken.json for Org 2
-  hosts:
-    - <WEKA_MANAGEMENT_IP>
-  force_https: false
-  verify_cert: false
+  auth_token_file: <orgN>-authtoken.json
+  hosts: [ <WEKA_MANAGEMENT_IP> ]
   mgmt_port: 14000
-
 stats:
-  # cpu / ops / ops_driver — see Appendix A.1
+  # cpu / ops / ops_driver — selects which weka stats to publish (see §4.1)
 ```
 
-### 4.5 Docker Compose Configuration
+> **The `stats:` section is required.** If it is missing, the exporter aborts with `KeyError: 'stats'` and restart-loops. Every listed category must have at least one metric under it.
 
-The full file is in **Appendix A.3**. Both services use container-internal port `8001`; the host ports `8001`/`8002` are separated by the `ports` mapping. Each service uses `command: -v` (the per-Org config is bind-mounted onto the default path `/weka/export.yml`). This compose does **not** set `user: "0:0"`, so the container runs as its default user and relies on the token files being `chmod 644` (see §4.2). It is derived from the stock weka-mon `docker-compose.yml` with the `grafana`/`loki`/`prometheus`/`alertmanager`/`quota-export` services commented out.
+### 5.4 Docker Compose (one service per Org)
 
-### 4.6 Run the Exporters
+Each Org is a service mapping a unique host port to container `8001`:
+
+```yaml
+services:
+  export-org1:
+    image: wekasolutions/export:20260216
+    volumes:
+      - ${PWD}/.weka:/weka/.weka
+      - ${PWD}/export-org1.yml:/weka/export.yml
+    command: -v
+    ports: ["8001:8001"]
+  export-org2:
+    image: wekasolutions/export:20260216
+    volumes:
+      - ${PWD}/.weka:/weka/.weka
+      - ${PWD}/export-org2.yml:/weka/export.yml
+    command: -v
+    ports: ["8002:8001"]
+```
+
+Adding an Org = add another `export-orgN` service with its token, config file, and the next host port.
+
+### 5.5 Run & verify
 
 ```bash
-cd /opt/weka-mon
-docker compose pull
 docker compose up -d
-docker ps
-```
-
-Expected:
-
-```text
-IMAGE                           PORTS                    NAMES
-wekasolutions/export:20260216   0.0.0.0:8001->8001/tcp  weka-export-org1
-wekasolutions/export:20260216   0.0.0.0:8002->8001/tcp  weka-export-org2
-```
-
-The `8002->8001` mapping (host 8002 → container 8001) is expected; both containers listen on `8001` internally.
-
-### 4.7 Run a Test Workload
-
-`weka_fs_stats` only has data when there is filesystem I/O. Mount each Org's filesystem on the client (using its Org token) and run FIO.
-
-```bash
-mkdir -p /mnt/org1fs1 /mnt/org2fs1
-mount -t wekafs -o auth_token_path=/opt/weka-mon/.weka/org1-authtoken.json \
-  <WEKA_MANAGEMENT_IP>/org1fs1 /mnt/org1fs1
-mount -t wekafs -o auth_token_path=/opt/weka-mon/.weka/org2-authtoken.json \
-  <WEKA_MANAGEMENT_IP>/org2fs1 /mnt/org2fs1
-
-# org1 = read, org2 = write, 30 minutes
-fio --name=org1read  --filename=/mnt/org1fs1/tf --rw=randread  --bs=64k --size=4G \
-  --direct=1 --ioengine=libaio --iodepth=32 --numjobs=4 --runtime=1800 --time_based &
-fio --name=org2write --directory=/mnt/org2fs1  --rw=randwrite --bs=64k --size=4G \
-  --direct=1 --ioengine=libaio --iodepth=32 --numjobs=4 --runtime=1800 --time_based &
-```
-
-### 4.8 Check the Metrics Endpoint
-
-```bash
 curl -s http://localhost:8001/metrics | grep '^weka_fs'   # org1
 curl -s http://localhost:8002/metrics | grep '^weka_fs'   # org2
 ```
 
-## 5. Validation Results
+`weka_fs_stats` only carries data while the filesystem has I/O — mount the Org's filesystem and run a workload to see it populate.
 
-### 5.1 `weka_fs` (capacity) and Per-Org separation
+## 6. Prometheus & Grafana Integration (planned task)
 
-```text
-# org1 (8001)
-weka_fs{cluster="smith-22",name="org1fs1",stat="available_total"} 1.1100000256e+011
-weka_fs{cluster="smith-22",name="org1fs1",stat="available_ssd"}   1.1100000256e+011
-...
-# org2 (8002)
-weka_fs{cluster="smith-22",name="org2fs1",stat="available_total"} 2.22000001024e+011
-weka_fs{cluster="smith-22",name="org2fs1",stat="available_ssd"}   2.22000001024e+011
-...
-```
+> **Not yet executed — this is the next planned exercise.** Intended layout:
+> - **client-0** runs the per-Org **exporters** (this guide).
+> - **client-1** runs an **external Prometheus** (scraping the exporters) and an **external Grafana** (per-Org dashboards).
 
-| Endpoint | Auth token | Observed filesystem | Result |
-|---|---|---|---|
-| `localhost:8001/metrics` | `org1-authtoken.json` | `org1fs1`, `fs_id=2` | OK |
-| `localhost:8002/metrics` | `org2-authtoken.json` | `org2fs1`, `fs_id=3` | OK |
-
-### 5.2 `weka_fs_stats` stability across the run
-
-`weka_fs_stats` produced the full set of series at every sample point throughout the 30-minute run, with no `node-host` errors:
-
-| Elapsed | org1 series | org2 series | node-host err | cluster I/O |
-|---|---|---|---|---|
-| 2 min | 6 | 6 | 0 | reads 3.56 / writes 2.94 GiB/s |
-| 5 min | 6 | 6 | 0 | reads 3.32 / writes 3.15 GiB/s |
-| 10 min | 6 | 6 | 0 | reads 3.71 / writes 2.93 GiB/s |
-| 15 min | 6 | 6 | 0 | reads 3.68 / writes 2.94 GiB/s |
-| 22 min | 6 | 6 | 0 | reads 3.53 / writes 2.91 GiB/s |
-| 25 min | 6 | 6 | 0 | reads 3.36 / writes 3.09 GiB/s |
-
-### 5.3 `weka_fs_stats` sample output (at 22 min)
-
-**org1 (`fs_id=2`, random read):**
-
-```text
-weka_fs_stats{cluster="smith-22",fs_id="2",fs_name="org1fs1",stat="READS",unit="iops"} 59315.97
-weka_fs_stats{cluster="smith-22",fs_id="2",fs_name="org1fs1",stat="READ_BYTES",unit="bytespersec"} 3.887e+09
-weka_fs_stats{cluster="smith-22",fs_id="2",fs_name="org1fs1",stat="READ_LATENCY",unit="microsecs"} 1958.06
-weka_fs_stats{cluster="smith-22",fs_id="2",fs_name="org1fs1",stat="THROUGHPUT",unit="bytespersec"} 3.887e+09
-weka_fs_stats{cluster="smith-22",fs_id="2",fs_name="org1fs1",stat="WRITES",unit="iops"} 0.0
-weka_fs_stats{cluster="smith-22",fs_id="2",fs_name="org1fs1",stat="WRITE_BYTES",unit="bytespersec"} 0.0
-```
-
-**org2 (`fs_id=3`, random write):**
-
-```text
-weka_fs_stats{cluster="smith-22",fs_id="3",fs_name="org2fs1",stat="READS",unit="iops"} 0.0
-weka_fs_stats{cluster="smith-22",fs_id="3",fs_name="org2fs1",stat="READ_BYTES",unit="bytespersec"} 0.0
-weka_fs_stats{cluster="smith-22",fs_id="3",fs_name="org2fs1",stat="THROUGHPUT",unit="bytespersec"} 3.055e+09
-weka_fs_stats{cluster="smith-22",fs_id="3",fs_name="org2fs1",stat="WRITES",unit="iops"} 46612.88
-weka_fs_stats{cluster="smith-22",fs_id="3",fs_name="org2fs1",stat="WRITE_BYTES",unit="bytespersec"} 3.055e+09
-weka_fs_stats{cluster="smith-22",fs_id="3",fs_name="org2fs1",stat="WRITE_LATENCY",unit="microsecs"} 2490.22
-```
-
-Key findings:
-
-- `fs_id` / `fs_name` labels present (org1=2, org2=3).
-- org1 shows read activity only; org2 shows write activity only — workload direction is reflected exactly, confirming per-Org isolation.
-- Read IOPS ~53k–59k, write IOPS ~46k–49k, throughput ~3.0–3.9 GB/s — consistent across the full run.
-
-## 6. Operational Considerations
-
-1. The Exporter must use an authentication token generated within the target Org.
-2. The config file **must** include the `stats:` section (otherwise `KeyError: 'stats'`).
-3. Token files default to `0600 root`; make them container-readable (`chmod 644`) **or** run the container as root (`user: "0:0"`), otherwise the container restart-loops with `Permission denied`.
-4. Before validating `weka_fs_stats`, run an actual read/write workload on the target filesystem.
-5. Use the `fs_id`, `fs_name`, `stat`, `unit` labels to distinguish per-filesystem metrics in Prometheus and Grafana.
-6. Do not store token/credential files as plaintext in source repositories or general documents.
-
-## 7. Conclusion
-
-On WEKA `v4.4.33`, the Multi-Org Exporter configuration was completed successfully using the `wekasolutions/export:20260216` image. Both `weka_fs` (capacity) and `weka_fs_stats` (per-filesystem IOPS, throughput, latency) were emitted correctly with per-Org separation, and `weka_fs_stats` remained stable across the full 30-minute workload. The `fs_id` and `fs_name` labels allow per-filesystem identification in Prometheus and Grafana. v4.4.33 behaves equivalently to v4.4.10.171.
-
-## Appendix A. Configuration Files Used
-
-These are the exact files used on the Exporter host (`/opt/weka-mon`). `<WEKA_MANAGEMENT_IP>` stands for a backend management IP (port `14000`). The `export-org*.yml` files are based on the stock `export.yml` template, so `events_to_loki`/`events_to_syslog` are left `True`; the Loki container is commented out in `docker-compose.yml` (§A.3), so event delivery to Loki simply does not occur — this does not affect metric collection. Token files are made container-readable with `chmod 644` (the compose does **not** set `user: "0:0"`).
-
-### A.1 `export-org1.yml`
+Planned Prometheus scrape config (one job per Org):
 
 ```yaml
-exporter:
-  listen_port: 8001
-  events_only: False
-  events_to_loki: True
-  events_to_syslog: True
-  timeout: 10.0
-  max_procs: 8
-  max_threads_per_proc: 100
-  backends_only: True
-  datapoints_per_collect: 5
-  certfile: null
-  keyfile: null
-
-loki:
-  host: localhost
-  port: 3100
-  protocol: https
-  path: /loki/api/v1/push
-  user: null
-  password: null
-  org_id: null
-  client_cert: null
-  verify_cert: False
-
-cluster:
-  auth_token_file: org1-authtoken.json
-  hosts:
-    - <WEKA_MANAGEMENT_IP>
-  force_https: False   # only 3.10+ clusters support https
-  verify_cert: False  # default cert cannot be verified
-  mgmt_port: 14000
-
-stats:
-  cpu:     # Category
-     CPU_UTILIZATION: "%"    # metric
-  ops:
-    ACCESS_OPS: ops
-    COMMIT_OPS: ops
-    CREATE_OPS: ops
-    FILECLOSE_OPS: ops
-    FILEOPEN_OPS: ops
-    FLOCK_OPS: ops
-    FSINFO_OPS: ops
-    GETATTR_OPS: ops
-    LINK_OPS: ops
-    MKDIR_OPS: ops
-    MKNOD_OPS: ops
-    OPS: ops
-    READDIR_OPS: ops
-    READS: iops
-    READ_BYTES: bytespersec
-    READ_DURATION: microsecs
-    READ_LATENCY: microsecs
-    REMOVE_OPS: ops
-    RENAME_OPS: ops
-    RMDIR_OPS: ops
-    THROUGHPUT: bytespersec
-    UNLINK_OPS: ops
-    WRITES: iops
-    WRITE_BYTES: bytespersec
-    WRITE_LATENCY: microsecs
-  ops_driver:     # Category
-    DIRECT_READ_SIZES: sizes
-    DIRECT_WRITE_SIZES: sizes
-    READ_SIZES: sizes
-    WRITE_SIZES: sizes
+scrape_configs:
+  - job_name: weka-org1
+    static_configs:
+      - targets: ['<client-0>:8001']
+        labels: { org: org1 }
+  - job_name: weka-org2
+    static_configs:
+      - targets: ['<client-0>:8002']
+        labels: { org: org2 }
 ```
 
-> Note: only one top-level `stats:` key is present, and every active category (`cpu`, `ops`, `ops_driver`) has at least one metric. The exporter aborts if `stats:` is duplicated or if a category is listed with no metrics under it.
+Grafana: add the external Prometheus as a data source and build per-Org panels keyed on `fs_name` / the `org` label (e.g. `weka_fs_stats{stat="READS"}`). The detailed external-Prometheus + external-Grafana walkthrough will be added once the task is completed and validated.
 
-### A.2 `export-org2.yml`
+## 7. Troubleshooting
 
-Identical to A.1 except `cluster.auth_token_file`:
+| Symptom | Cause | Fix |
+|---|---|---|
+| Container restart-loops; log `KeyError: 'stats'` | `export.yml` has no `stats:` section (or a duplicate / empty category) | Add a single valid `stats:` section; every category needs ≥1 metric |
+| Container restart-loops; log `Permission denied: .../*-authtoken.json` | Token file is `0600 root`, unreadable by the non-root container | `chmod 644` the token, or set `user: "0:0"` |
+| `weka_fs` present but `weka_fs_stats` empty | No filesystem I/O at scrape time | Run a read/write workload; per-fs stats only appear with activity |
+| `weka_fs_stats` empty + repeating `Exception looking up node-host map: 'node-host'` | Exporter/WEKA version mismatch in per-fs stats collection | Use the image validated for your WEKA build (`20260216` for 4.4.x); re-validate per exact build |
+| `docker compose up` mounts a directory at `/weka/export.yml` | The `export-orgN.yml` bind-mount source file does not exist | Create the config file before `up` |
 
-```yaml
-cluster:
-  auth_token_file: org2-authtoken.json
-```
+## 8. Security & Operations
 
-### A.3 `docker-compose.yml`
+- **Isolation** comes from the token: an Org-admin token only exposes that Org's filesystems. Use the correct per-Org token for each exporter.
+- **Credentials**: protect token files; do not commit them. Prefer `user: "0:0"` over world-readable `644` in production.
+- **Scaling**: one service + one host port per Org; keep a consistent naming convention (`export-orgN`, `orgN-authtoken.json`, port `800N`).
 
-This is derived from the stock weka-mon `docker-compose.yml`: the `grafana`, `loki`, `prometheus`, `alertmanager`, and `quota-export` services are commented out, leaving only the two exporter services active. Both use `command: -v` (the per-Org config is bind-mounted onto the default path `/weka/export.yml`, so no explicit `-c` is needed). There is **no** `user: "0:0"` — the container runs as its default user and reads the `chmod 644` token files (see §4.2).
+## 9. Validation Status
 
-```yaml
-services:
+- WEKA `v4.4.10.171` — validated (stable across a 30-minute workload).
+- WEKA `v4.4.33` — validated on three independent fresh deployments (stable; per-Org separation and workload direction correct).
 
-  export-org1:
-    image: wekasolutions/export:20260216
-    container_name: weka-export-org1
-    volumes:
-      - /dev/log:/dev/log
-      - ${PWD}/.weka:/weka/.weka
-      - /etc/hosts:/etc/hosts
-      - ${PWD}/export-org1.yml:/weka/export.yml
-    command: -v
-    restart: always
-    ports:
-      - "8001:8001"
-    logging:
-      options:
-        max-file: "5"
-        max-size: "15m"
+Details, sample metric output, and the exact configuration files: [validation-report-v4.4.33.md](validation-report-v4.4.33.md).
 
-  export-org2:
-    image: wekasolutions/export:20260216
-    container_name: weka-export-org2
-    volumes:
-      - /dev/log:/dev/log
-      - ${PWD}/.weka:/weka/.weka
-      - /etc/hosts:/etc/hosts
-      - ${PWD}/export-org2.yml:/weka/export.yml
-    command: -v
-    restart: always
-    ports:
-      - "8002:8001"
-    logging:
-      options:
-        max-file: "5"
-        max-size: "15m"
-```
+## 10. References
+
+- WEKA External Monitoring (WEKAmon): https://docs.weka.io/monitor-the-weka-cluster/external-monitoring
+- WEKA list of statistics: https://docs.weka.io/usage/statistics/list-of-statistics
+- Exporter image: `wekasolutions/export`
+
+## Open Items / TODO
+
+- [ ] Live 1:1 `weka stats` ↔ `weka_fs_stats` value/unit comparison (§4.1) on the next cluster.
+- [ ] External Prometheus + external Grafana walkthrough (§6): exporters on client-0, Prometheus/Grafana on client-1.
+- [ ] Optional: example Grafana dashboard JSON for per-Org panels.
