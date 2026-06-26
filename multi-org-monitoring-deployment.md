@@ -47,7 +47,21 @@ Prerequisite on client-1..4: a recent OS with internet egress; `curl`, `tar`, `u
 
 ---
 
-## 3. Loki (native binary) — client-3 (org1) & client-4 (org2)
+## 3. Deployment Procedure (overview)
+
+Deploy in this order — each step produces what the next one consumes:
+
+1. **Loki** — events store (client-3/4, §4). Brought up first so the exporter has a live push target.
+2. **Exporters** — one container per Org (client-0, §5). The core data source: it pulls per-Org metrics from the WEKA cluster and pushes events to its Org's Loki. Everything downstream reads from here.
+3. **Prometheus** — scrapes each Org's exporter endpoint (`<C0>:8001` / `:8002`) (client-1/2, §6).
+4. **Grafana** — reads its local Prometheus + its Org's Loki and loads the dashboards (client-1/2, §7).
+5. **Verify** per-Org isolation (§8); optionally **enable extra metrics / build custom dashboards** (§9).
+
+> The exporter (client-0) is the heart of the stack — both metrics and events originate there. Loki is installed before it only because the exporter needs an existing push endpoint; if you start the exporter first, event pushes harmlessly retry until Loki is ready. Prometheus and Grafana must come after the exporter, since they have nothing to scrape/show until it is running.
+
+---
+
+## 4. Loki (native binary) — client-3 (org1) & client-4 (org2)
 
 ```bash
 command -v unzip >/dev/null || dnf install -y unzip
@@ -91,7 +105,7 @@ Run identically on client-3 and client-4.
 
 ---
 
-## 4. Exporters (Docker) — client-0
+## 5. Exporters (Docker) — client-0
 
 One exporter per Org, each pointing at its Org's Loki (`<C3>` for org1, `<C4>` for org2).
 
@@ -176,7 +190,7 @@ curl -s http://localhost:8001/metrics | grep '^weka_fs'    # org1
 
 ---
 
-## 5. Prometheus (native binary) — client-1 (org1) & client-2 (org2)
+## 6. Prometheus (native binary) — client-1 (org1) & client-2 (org2)
 
 ```bash
 V=2.50.1
@@ -235,7 +249,7 @@ curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"up"'   # targe
 
 ---
 
-## 6. Grafana (native, yum) — client-1 (org1) & client-2 (org2)
+## 7. Grafana (native, yum) — client-1 (org1) & client-2 (org2)
 
 ```bash
 cat > /etc/yum.repos.d/grafana.repo <<'R'
@@ -300,7 +314,7 @@ Grafana UI: `http://<C1>:3000` (org1) / `http://<C2>:3000` (org2), login `admin`
 
 ---
 
-## 7. Verification (smith-25, WEKA v4.4.33)
+## 8. Verification (smith-25, WEKA v4.4.33)
 
 | Check | client-1 (org1) | client-2 (org2) |
 |---|---|---|
@@ -311,11 +325,11 @@ Grafana UI: `http://<C1>:3000` (org1) / `http://<C2>:3000` (org2), login `admin`
 
 With an FIO workload (org1 random read / org2 random write), `weka_fs_stats` populates per Org in each Prometheus, and the exporter's events appear in each Org's Loki — visible in that Org's Grafana (metrics dashboards + `Weka Logs`). Neither Org's stack references the other's data.
 
-## 8. Worked example — enable an extra metric and surface it on a dashboard
+## 9. Worked example — enable an extra metric and surface it on a dashboard
 
 Enabling a stat in `stats:` makes the exporter/Prometheus **collect** it, but it only **appears on a dashboard if a panel queries it**. The bundled dashboards query only `cpu` / `ops` / `ops_driver(RDMA)` / `ops_nfs` from `weka_stats` (plus `weka_fs`, `weka_overview_*`, etc.) — they do **not** query `category=ssd` or `category=network`. So enabling those alone changes nothing on screen; you must add a panel. Full A→B example using `network / PUMPS_TXQ_FULL`.
 
-### 8.1 (A) Enable the metric in the exporter config
+### 9.1 (A) Enable the metric in the exporter config
 
 On client-0, add the category/stat to each `export-orgN.yml` `stats:` section:
 
@@ -336,7 +350,7 @@ curl -s -G http://localhost:9090/api/v1/query \
   --data-urlencode 'query=count(weka_stats{category="network",stat="PUMPS_TXQ_FULL"})'
 ```
 
-### 8.2 (B) Add a custom panel to a provisioned dashboard
+### 9.2 (B) Add a custom panel to a provisioned dashboard
 
 Provisioned dashboards are JSON files under `/var/lib/grafana/dashboards/` (here `Weka_Cluster_Overview.json`, uid `WekaOverview`). Append a panel to the top-level `panels` array; Grafana re-imports on reload.
 
@@ -365,7 +379,7 @@ systemctl restart grafana-server      # or wait for the file provider to reload
 
 > Rather than hand-editing a 60+ panel JSON, we used a small Python script that loads the file, computes the next `id` and the current bottom `y` (max `gridPos.y + h`), appends the row + timeseries, and writes it back. This avoids breaking the existing layout.
 
-### 8.3 Verify on the dashboard
+### 9.3 Verify on the dashboard
 
 ```bash
 # panel present in the dashboard model:
@@ -379,11 +393,11 @@ Grafana → **Weka Cluster Overview → scroll to bottom → "Network (custom)"*
 
 **Takeaway:** dashboard visibility = (1) `stats:` enables collection → (2) Prometheus scrapes → (3) **a panel must query it**. Steps 1–2 are necessary but not sufficient; step 3 is what puts the metric on screen. (This is why enabling `ssd` alone showed nothing — no bundled panel queries it.)
 
-### 8.4 Build a brand-new custom dashboard (per-Org filesystem I/O)
+### 9.4 Build a brand-new custom dashboard (per-Org filesystem I/O)
 
-§8.2 adds a panel to an *existing* dashboard. This builds a **standalone dashboard** from scratch — the right approach for the multi-Org headline view: **per-filesystem I/O from `weka_fs_stats`** (the metric that has `fs_id`/`fs_name` and is **not** used by any bundled dashboard). The *same* dashboard JSON is deployed to both Org Grafanas; each shows only its own Org's filesystem because each reads only its own Org's Prometheus.
+§9.2 adds a panel to an *existing* dashboard. This builds a **standalone dashboard** from scratch — the right approach for the multi-Org headline view: **per-filesystem I/O from `weka_fs_stats`** (the metric that has `fs_id`/`fs_name` and is **not** used by any bundled dashboard). The *same* dashboard JSON is deployed to both Org Grafanas; each shows only its own Org's filesystem because each reads only its own Org's Prometheus.
 
-Provision it like any other dashboard: drop a JSON file into `/var/lib/grafana/dashboards/` (the file provider in §6 auto-loads it).
+Provision it like any other dashboard: drop a JSON file into `/var/lib/grafana/dashboards/` (the file provider in §7 auto-loads it).
 
 Dashboard essentials:
 - Give it a unique `uid` (e.g. `perorgfsio`) and a `title`.
@@ -454,9 +468,9 @@ Validated on smith-25 under FIO load (org1 random read / org2 random write):
 
 → proves the multi-Org headline value: each tenant's Grafana shows **only its own filesystem's per-fs I/O**, drawn from `weka_fs_stats`. Keep a workload running while building/observing — `weka_fs_stats` is empty without I/O.
 
-> **Two ways to add visualizations** (both in this runbook): **§8.2** = append a panel to an existing dashboard JSON; **§8.4** = ship a whole new dashboard JSON. Both are just files under `/var/lib/grafana/dashboards/` picked up by the file provider.
+> **Two ways to add visualizations** (both in this runbook): **§9.2** = append a panel to an existing dashboard JSON; **§9.4** = ship a whole new dashboard JSON. Both are just files under `/var/lib/grafana/dashboards/` picked up by the file provider.
 
-## 9. Operations Notes
+## 10. Operations Notes
 
 - **Bring-up order:** Loki (client-3/4) → exporters (client-0, push to those Loki) → Prometheus + Grafana (client-1/2).
 - **Service mgmt (native):** `systemctl status|restart loki|prometheus|grafana-server`; logs via `journalctl -u <svc>`.
