@@ -86,22 +86,20 @@ Each per-Org exporter exposes, on its `/metrics` endpoint:
 
 ### 4.1 How the `stats:` section relates to `weka stats`
 
-The `stats:` section of `export.yml` is a **whitelist that selects which WEKA statistics the exporter scrapes and publishes**. Each entry maps directly to a `weka stats` category/statistic — the stock template states this explicitly: *"if you are familiar with 'weka stats', these are `--category <category> --stat <statistic>`."*
-
-Example mapping (the entries used for `weka_fs_stats`):
+The `stats:` section of `export.yml` is a **whitelist that selects which WEKA statistics the exporter publishes as `weka_stats`** (the per-node metric). Each entry maps directly to a `weka stats` category/statistic — the stock template states this explicitly: *"if you are familiar with 'weka stats', these are `--category <category> --stat <statistic>`."*
 
 | `export.yml` (`stats:`) | Equivalent `weka stats` query | Published as |
 |---|---|---|
-| `ops: READS` | `weka stats --category ops --stat READS` | `weka_fs_stats{...,stat="READS",unit="iops"}` |
-| `ops: READ_BYTES` | `weka stats --category ops --stat READ_BYTES` | `...stat="READ_BYTES",unit="bytespersec"` |
-| `ops: READ_LATENCY` | `weka stats --category ops --stat READ_LATENCY` | `...stat="READ_LATENCY",unit="microsecs"` |
-| `ops: THROUGHPUT` | `weka stats --category ops --stat THROUGHPUT` | `...stat="THROUGHPUT",unit="bytespersec"` |
-| `ops: WRITES / WRITE_BYTES / WRITE_LATENCY` | `weka stats --category ops --stat WRITE*` | `...stat="WRITE*"` |
+| `ops: READS` | `weka stats --category ops --stat READS` | `weka_stats{category="ops",stat="READS",unit="iops",...}` |
+| `ops: READ_LATENCY` | `weka stats --category ops --stat READ_LATENCY` | `weka_stats{category="ops",stat="READ_LATENCY",unit="microsecs",...}` |
 | `cpu: CPU_UTILIZATION` | `weka stats --category cpu --stat CPU_UTILIZATION` | `weka_stats{category="cpu",...}` |
+| `ssd: SSD_READ_REQS` | `weka stats --category ssd --stat SSD_READ_REQS` | `weka_stats{category="ssd",...}` |
 
 The full catalog of categories/statistics is in WEKA's [list of statistics](https://docs.weka.io/usage/statistics/list-of-statistics). The exporter only emits the entries you uncomment in `stats:`.
 
-> **TODO (next validation cluster):** capture a live 1:1 diff — run `weka stats --category ops --stat READS ...` on a backend and compare the values/units against the exporter's `weka_fs_stats` output at the same moment, to document the exact correspondence and any aggregation the exporter applies.
+> **Important — `weka_fs_stats` is separate from `stats:`.** The per-filesystem metric `weka_fs_stats` (labels `fs_id`/`fs_name`) is **not** controlled by the `stats:` section; the exporter always collects it via the internal `fs_stats` category. So enabling/disabling entries in `stats:` changes only `weka_stats`, never `weka_fs_stats`.
+
+> **Verified (smith-25, live):** the exporter mirrors `weka stats` **1:1, no extra aggregation**. At the same instant, backend `weka stats --category fs_stats --stat READS` returned **`59611.98 ops/s`** and the exporter's `weka_fs_stats{fs_name="org1fs1",stat="READS"}` read **`59611.98 iops`** — identical value, same unit (`ops/s` = `iops`). The exporter republishes WEKA's computed value as-is.
 
 ## 5. Configuration
 
@@ -221,8 +219,8 @@ Details, sample metric output, and the exact configuration files: [validation-re
 - WEKA list of statistics: https://docs.weka.io/usage/statistics/list-of-statistics
 - Exporter image: `wekasolutions/export`
 
-## Open Items / TODO
+## Done / Validated
 
-- [ ] Live 1:1 `weka stats` ↔ `weka_fs_stats` value/unit comparison (§4.1) on the next cluster.
-- [ ] External Prometheus + external Grafana walkthrough (§6): exporters on client-0, Prometheus/Grafana on client-1.
-- [ ] Optional: example Grafana dashboard JSON for per-Org panels.
+- [x] Live 1:1 `weka stats` ↔ `weka_fs_stats` value/unit comparison — exact match on smith-25 (§4.1).
+- [x] External (native) Prometheus + Grafana + Loki deployment — full runbook in [multi-org-monitoring-deployment.md](multi-org-monitoring-deployment.md) (§3–7).
+- [x] Per-Org Grafana dashboard for `weka_fs_stats` — `Per-Org Filesystem IO` (deployment runbook §8.4); plus a custom-panel example (§8.2).
