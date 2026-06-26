@@ -175,22 +175,22 @@ curl -s http://localhost:8002/metrics | grep '^weka_fs'   # org2
 
 `weka_fs_stats` only carries data while the filesystem has I/O — mount the Org's filesystem and run a workload to see it populate.
 
-## 6. Prometheus, Grafana & Loki Integration (implemented)
+## 6. External (Native) Prometheus, Grafana & Loki Integration (implemented)
 
-A full **per-Org-isolated** monitoring stack has been built and validated (WEKA v4.4.33): each Org gets its own Prometheus + Grafana (metrics) and its own Loki (events), all fed from the per-Org exporters. See the dedicated deployment guide:
+A full **per-Org-isolated** monitoring stack has been built and validated (WEKA v4.4.33). Here **"external" means natively installed on the OS** — Grafana from the official yum repo, Prometheus and Loki from official release binaries with `systemd` — **not** the bundled `weka-mon` Docker stack. Only the WEKA exporter stays a container. Each Org gets its own Prometheus + Grafana (metrics) and its own Loki (events). Full runbook:
 
 ➡️ **[multi-org-monitoring-deployment.md](multi-org-monitoring-deployment.md)**
 
 Layout (validated on `smith-25`):
-- **client-0** — per-Org exporters (`:8001` org1, `:8002` org2)
-- **client-1 / client-2** — external Prometheus + Grafana, one per Org
-- **client-3 / client-4** — external Loki, one per Org (exporter pushes events here)
+- **client-0** — per-Org exporters, Docker (`:8001` org1, `:8002` org2)
+- **client-1 / client-2** — native Prometheus (binary) + Grafana (yum), one per Org
+- **client-3 / client-4** — native Loki (binary), one per Org (exporter pushes events here)
 
 Two data flows, isolated per tenant:
-- **Metrics**: exporter → Prometheus (per Org) → Grafana → `Weka_FS` / `Weka_Cluster_Overview` etc.
-- **Events**: exporter → Loki (per Org) → Grafana → `Weka_Logs`
+- **Metrics**: exporter → Prometheus (per Org) → Grafana → `Weka Cluster Overview` / `Weka Filesystems Detail` etc.
+- **Events**: exporter → Loki (per Org) → Grafana → `Weka Logs`
 
-Full node-by-node procedure, config snippets, and verification results are in the deployment guide above.
+The runbook above has the exact install commands and the edited parameters per component.
 
 ## 7. Troubleshooting
 
