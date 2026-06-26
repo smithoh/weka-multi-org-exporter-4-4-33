@@ -1,8 +1,5 @@
 # WEKA Multi-Org Exporter — Overview
 
-> **Status: DRAFT.** Fact-based draft for review before wider distribution (team / tools repository).
-> Step-by-step deployment is in the [deployment runbook](multi-org-monitoring-deployment.md).
-
 ## TL;DR
 
 The WEKA Prometheus exporter container (`wekasolutions/export`) reports **cluster-wide** metrics by default. In a **multi-Organization (multi-tenant)** cluster, a single exporter cannot give each tenant a view limited to *their own* Organization's filesystems.
