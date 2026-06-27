@@ -475,6 +475,18 @@ Validated on smith-25 under FIO load (org1 random read / org2 random write):
 
 → proves the multi-Org headline value: each tenant's Grafana shows **only its own filesystem's per-fs I/O**, drawn from `weka_fs_stats`. Keep a workload running while building/observing — `weka_fs_stats` is empty without I/O.
 
+#### 9.4 (GUI alternative) — build the dashboard in the UI
+
+Because this is a **new** dashboard (not provisioned), the GUI **Save works cleanly** — unlike §9.2:
+
+1. **Dashboards → New → New dashboard → + Add visualization**; pick the **Prometheus** data source.
+2. Build three **Time series** panels using the queries from the table above (Code-mode query + `{{fs_name}} …` legend), and set each panel's **Unit**: `iops` / `bytes/sec(SI)` / `microseconds (µs)`.
+3. **Save** → title `Per-Org Filesystem IO`. It is stored in Grafana's DB on that node.
+
+Trade-off vs the file method: a GUI-built dashboard lives in **one node's DB only** and is not portable — you'd rebuild it on each Org's Grafana. The file method above (same JSON dropped on every node) is the right choice for multi-node, provisioning-consistent deployment. For per-Org isolation it makes no difference which method you use — each node still reads only its own Org's Prometheus.
+
+> **Note (Grafana 13):** to later make this **provisioned** (in `/var/lib/grafana/dashboards/`), use the **file/JSON above**, not a GUI *Export* — GUI Export emits the new v2 schema, which the file provider does not load reliably (see §9.2).
+
 > **Two ways to add visualizations** (both in this runbook): **§9.2** = append a panel to an existing dashboard JSON; **§9.4** = ship a whole new dashboard JSON. Both are just files under `/var/lib/grafana/dashboards/` picked up by the file provider.
 
 ## 10. Operations Notes
