@@ -379,6 +379,13 @@ systemctl restart grafana-server      # or wait for the file provider to reload
 
 > Rather than hand-editing a 60+ panel JSON, we used a small Python script that loads the file, computes the next `id` and the current bottom `y` (max `gridPos.y + h`), appends the row + timeseries, and writes it back. This avoids breaking the existing layout.
 
+> **CLI (file edit) vs GUI — which to use (Grafana 11+/13 note, validated on smith-25).**
+>
+> - **For a permanent, provisioned dashboard, you MUST use the CLI / file edit above.** The files under `/var/lib/grafana/dashboards/` are the source of truth and use the **legacy** dashboard schema (top-level `panels[]` + `schemaVersion`). Editing that legacy JSON and reloading is the only way to permanently change a provisioned dashboard across all nodes.
+> - **The GUI is read-only for provisioned dashboards.** You can build/preview a panel in the UI, but **Save is blocked** (*"cannot be saved … provisioned"*); the Save dialog only offers Copy/Export JSON.
+> - **GUI Export is NOT a drop-in replacement for the file on Grafana 13.** Once a dashboard is opened/edited in Grafana 13 it is migrated in-memory to the **new v2 schema** (`elements` / `layout` / `vizConfig`, no `panels[]`). **Both** export models — *V2 Resource* **and** *Classic* — emit that new schema; the toggle only changes the outer resource envelope, not the body. Such a file does **not** match the legacy schema the provisioned files use, so dropping it into `/var/lib/grafana/dashboards/` is unreliable. → To update a provisioned dashboard permanently, edit the legacy JSON via CLI (above), **not** via GUI export.
+> - **GUI Import is fine for a quick / per-node / experimental copy.** Dashboards → New → Import the JSON under a **new name + uid** (the provisioned uid `WekaOverview` is reserved, so import creates a *separate* dashboard). The copy lives in Grafana's DB (`provisioned: false`), is freely editable, exists only on that node, and leaves the provisioned original untouched — verified: imported `Weka Cluster Overview (new imported test)` showed the custom `PUMPS_TXQ_FULL` panel while the provisioned original kept its 63 panels unchanged.
+
 ### 9.3 Verify on the dashboard
 
 ```bash
