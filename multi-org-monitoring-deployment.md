@@ -515,3 +515,312 @@ Trade-off vs the file method: a GUI-built dashboard lives in **one node's DB onl
 - **Data dirs / perms:** `/loki` owned by `loki`; `/var/lib/prometheus` owned by `prometheus`; `/var/lib/grafana` owned by `grafana`.
 - **Network:** Prometheus(C1/C2)→exporter(C0):8001/8002; exporter(C0)→Loki(C3/C4):3100 must be reachable.
 - **Scaling:** add `export-orgN` (next port) on client-0 + a dedicated Prometheus/Grafana + Loki node per new Org.
+
+## Appendix A — Configuration files (as deployed on smith-25)
+
+> Verbatim files from this validated deployment. Real private IPs (`10.0.100.x`) are kept for fidelity — substitute per the §1 table for your own cluster.
+> **Token files (`org*-authtoken.json`) are secrets and are intentionally NOT included.** `export.yml` only references them by filename.
+
+### A.1 client-0 — exporters (Docker), `/opt/weka-mon/`
+
+`export-org1.yml`:
+
+```yaml
+exporter:
+  listen_port: 8001
+  events_only: false
+  events_to_loki: true
+  events_to_syslog: false
+  timeout: 10.0
+  max_procs: 8
+  max_threads_per_proc: 100
+  backends_only: true
+  datapoints_per_collect: 5
+  certfile: null
+  keyfile: null
+
+loki:
+  host: 10.0.100.5            # org1 Loki (client-3); org2 -> 10.0.100.4
+  port: 3100
+  protocol: http
+  path: /loki/api/v1/push
+  user: null
+  password: null
+  org_id: null
+  client_cert: null
+  verify_cert: false
+
+cluster:
+  auth_token_file: org1-authtoken.json   # org2 -> org2-authtoken.json
+  hosts:
+    - 10.0.100.10
+  force_https: false
+  verify_cert: false
+  mgmt_port: 14000
+
+stats:
+  cpu:
+    CPU_UTILIZATION: "%"
+  ops:
+    ACCESS_LATENCY: microsecs
+    ACCESS_OPS: ops
+    COMMIT_LATENCY: microsecs
+    COMMIT_OPS: ops
+    CREATE_LATENCY: microsecs
+    CREATE_OPS: ops
+    FILECLOSE_LATENCY: microsecs
+    FILECLOSE_OPS: ops
+    FILEOPEN_LATENCY: microsecs
+    FILEOPEN_OPS: ops
+    FLOCK_OPS: ops
+    FSINFO_OPS: ops
+    GETATTR_LATENCY: microsecs
+    GETATTR_OPS: ops
+    LINK_OPS: ops
+    MKDIR_OPS: ops
+    MKNOD_OPS: ops
+    OPS: ops
+    READDIR_OPS: ops
+    READS: iops
+    READ_BYTES: bytespersec
+    READ_DURATION: microsecs
+    READ_LATENCY: microsecs
+    REMOVE_OPS: ops
+    RENAME_OPS: ops
+    RMDIR_OPS: ops
+    THROUGHPUT: bytespersec
+    UNLINK_OPS: ops
+    WRITES: iops
+    WRITE_BYTES: bytespersec
+    WRITE_DURATION: microsecs
+    WRITE_LATENCY: microsecs
+  ops_driver:
+    DIRECT_READ_SIZES: sizes
+    DIRECT_WRITE_SIZES: sizes
+    READ_SIZES: sizes
+    WRITE_SIZES: sizes
+  ssd:
+    DRIVE_READ_LATENCY: microsecs
+    DRIVE_READ_OPS: ops
+    DRIVE_WRITE_LATENCY: microsecs
+    DRIVE_WRITE_OPS: ops
+    SSD_BLOCKS_READ: count
+    SSD_BLOCKS_WRITTEN: count
+    SSD_READ_LATENCY: microsecs
+    SSD_READ_REQS: iops
+    SSD_WRITES: iops
+    SSD_WRITE_LATENCY: microsecs
+  network:
+    PUMPS_TXQ_FULL: times
+```
+
+> `export-org2.yml` is identical **except** `loki.host: 10.0.100.4` and `cluster.auth_token_file: org2-authtoken.json`.
+
+`docker-compose-export.yml` (note: absolute paths, not `${PWD}` — see Appendix B):
+
+```yaml
+services:
+  export-org1:
+    image: wekasolutions/export:20260216
+    container_name: weka-export-org1
+    user: "0:0"
+    volumes:
+      - /opt/weka-mon/.weka:/weka/.weka
+      - /etc/hosts:/etc/hosts
+      - /opt/weka-mon/export-org1.yml:/weka/export.yml
+    command: ["-v","-c","/weka/export.yml"]
+    restart: always
+    ports: ["8001:8001"]
+  export-org2:
+    image: wekasolutions/export:20260216
+    container_name: weka-export-org2
+    user: "0:0"
+    volumes:
+      - /opt/weka-mon/.weka:/weka/.weka
+      - /etc/hosts:/etc/hosts
+      - /opt/weka-mon/export-org2.yml:/weka/export.yml
+    command: ["-v","-c","/weka/export.yml"]
+    restart: always
+    ports: ["8002:8001"]
+```
+
+### A.2 client-1 / client-2 — Prometheus (native)
+
+`/etc/prometheus/prometheus.yml` (client-1 shown; client-2 in comments):
+
+```yaml
+global:
+  scrape_interval: 60s
+scrape_configs:
+  - job_name: weka
+    static_configs:
+      - targets: ["10.0.100.6:8001"]    # client-1 = org1 ; client-2 -> "10.0.100.6:8002"
+        labels:
+          org: "org1"                   # client-2 -> "org2"
+```
+
+`/etc/systemd/system/prometheus.service`:
+
+```ini
+[Unit]
+Description=Prometheus
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=prometheus
+Group=prometheus
+ExecStart=/usr/local/bin/prometheus \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus \
+  --web.console.templates=/etc/prometheus/consoles \
+  --web.console.libraries=/etc/prometheus/console_libraries
+Restart=always
+[Install]
+WantedBy=multi-user.target
+```
+
+### A.3 client-1 / client-2 — Grafana (native, yum)
+
+`/etc/grafana/provisioning/datasources/weka.yml` (client-1; client-2 Loki url -> `http://10.0.100.4:3100`):
+
+```yaml
+apiVersion: 1
+datasources:
+- name: Prometheus
+  type: prometheus
+  access: proxy
+  url: http://localhost:9090
+  isDefault: true
+- name: Loki
+  type: loki
+  access: proxy
+  url: http://10.0.100.5:3100        # client-1 = org1 Loki(client-3); client-2 -> http://10.0.100.4:3100
+  isDefault: false
+```
+
+`/etc/grafana/provisioning/dashboards/weka.yml`:
+
+```yaml
+apiVersion: 1
+providers:
+- name: weka
+  type: file
+  options:
+    path: /var/lib/grafana/dashboards
+```
+
+### A.4 client-3 / client-4 — Loki (native binary)
+
+`/etc/loki/loki-config.yaml` (identical on both nodes; reused from the weka-mon package):
+
+```yaml
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v12
+      index:
+        prefix: index_
+        period: 24h
+
+ruler:
+  alertmanager_url: http://localhost:9093
+```
+
+`/etc/systemd/system/loki.service`:
+
+```ini
+[Unit]
+Description=Grafana Loki
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=loki
+Group=loki
+ExecStart=/usr/local/bin/loki -config.file=/etc/loki/loki-config.yaml
+Restart=always
+[Install]
+WantedBy=multi-user.target
+```
+
+### A.5 Custom dashboard — `Per_Org_Filesystem_IO.json`
+
+Deployed to `/var/lib/grafana/dashboards/Per_Org_Filesystem_IO.json` on client-1 and client-2 (uid `perorgfsio`; §9.4):
+
+```json
+{
+  "uid": "perorgfsio",
+  "title": "Per-Org Filesystem IO",
+  "tags": ["weka", "multi-org", "custom"],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      { "name": "weka_datasource", "label": "Data source", "type": "datasource",
+        "query": "prometheus", "refresh": 1, "hide": 0, "includeAll": false, "multi": false, "current": {} }
+    ]
+  },
+  "panels": [
+    { "id": 1, "type": "row", "title": "Per-Org Filesystem I/O (weka_fs_stats)", "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    { "id": 2, "type": "timeseries", "title": "IOPS by filesystem (READS / WRITES)",
+      "datasource": { "type": "prometheus", "uid": "${weka_datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "iops", "color": { "mode": "palette-classic" },
+        "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${weka_datasource}" }, "expr": "weka_fs_stats{stat=\"READS\"}", "legendFormat": "{{fs_name}} READS" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${weka_datasource}" }, "expr": "weka_fs_stats{stat=\"WRITES\"}", "legendFormat": "{{fs_name}} WRITES" }
+      ] },
+    { "id": 3, "type": "timeseries", "title": "Throughput by filesystem (READ_BYTES / WRITE_BYTES)",
+      "datasource": { "type": "prometheus", "uid": "${weka_datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "unit": "Bps", "color": { "mode": "palette-classic" },
+        "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${weka_datasource}" }, "expr": "weka_fs_stats{stat=\"READ_BYTES\"}", "legendFormat": "{{fs_name}} READ" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${weka_datasource}" }, "expr": "weka_fs_stats{stat=\"WRITE_BYTES\"}", "legendFormat": "{{fs_name}} WRITE" }
+      ] },
+    { "id": 4, "type": "timeseries", "title": "Latency by filesystem (READ_LATENCY / WRITE_LATENCY)",
+      "datasource": { "type": "prometheus", "uid": "${weka_datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+      "fieldConfig": { "defaults": { "unit": "µs", "color": { "mode": "palette-classic" },
+        "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${weka_datasource}" }, "expr": "weka_fs_stats{stat=\"READ_LATENCY\"}", "legendFormat": "{{fs_name}} READ" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${weka_datasource}" }, "expr": "weka_fs_stats{stat=\"WRITE_LATENCY\"}", "legendFormat": "{{fs_name}} WRITE" }
+      ] }
+  ]
+}
+```
+
+## Appendix B — Operational gotchas observed on smith-25
+
+- **`docker-compose-export.yml` must use absolute paths, not `${PWD}`.** Under `sudo docker compose`, `${PWD}` can resolve empty, so `${PWD}/export-org1.yml` becomes `/export-org1.yml` and Docker silently creates a *directory* there → the exporter aborts with `Is a directory: '/weka/export.yml'`. Use `/opt/weka-mon/...` (as in Appendix A).
+- **`net.ipv4.ip_forward` must be `1` on the exporter host (client-0).** If it gets set to `0`, the host still reaches the cluster but **bridge containers cannot** — the exporter logs `Host unreachable` / `NewConnectionError` although `:14000` is open from the host. Persist it: `echo 'net.ipv4.ip_forward = 1' > /etc/sysctl.d/99-ipforward.conf && sysctl -p /etc/sysctl.d/99-ipforward.conf`.
+- **Exporter auth-token lifetime.** The org access token is short-lived (≈5 min) and is auto-refreshed via the refresh token at runtime; if that chain is interrupted, restart the exporter so it reloads a fresh token.
+- **Per-Org SSD quota.** Filesystems are capped by each Org's SSD quota (not just cluster free space). Raising it needs a **cluster admin** (`weka org set-quota <org> --ssd-quota …`); an Org admin cannot raise its own quota.
