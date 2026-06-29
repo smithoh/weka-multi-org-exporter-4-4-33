@@ -475,6 +475,23 @@ Validated on smith-25 under FIO load (org1 random read / org2 random write):
 
 → proves the multi-Org headline value: each tenant's Grafana shows **only its own filesystem's per-fs I/O**, drawn from `weka_fs_stats`. Keep a workload running while building/observing — `weka_fs_stats` is empty without I/O.
 
+**Validation (visual) — multiple filesystems per Org.** With extra filesystems per Org and distinct FIO patterns, the dashboard breaks each one out by `fs_name`, and each Org's Grafana shows only its own Org's filesystems:
+
+| Org | Filesystems shown | Per-fs FIO pattern |
+|---|---|---|
+| org1 (client-1) | `org1fs1`, `org1fs2` | fs1 = randrw 70/30 ; fs2 = randrw 50/50 |
+| org2 (client-2) | `org2fs1`, `org2fs2`, `org2fs3` | fs1 = randrw 30/70 ; fs2 = randread ; fs3 = randwrite |
+
+org1 Grafana — two filesystems:
+
+![Per-Org Filesystem IO — org1 (org1fs1 + org1fs2)](images/perorg-fsio-org1.png)
+
+org2 Grafana — three filesystems (fs2 read-only / fs3 write-only are clearly separated):
+
+![Per-Org Filesystem IO — org2 (org2fs1 + org2fs2 + org2fs3)](images/perorg-fsio-org2.png)
+
+The dashboard JSON is unchanged — new filesystems appear automatically as new series because the panels query `weka_fs_stats` grouped by `fs_name`.
+
 #### 9.4 (GUI alternative) — build the dashboard in the UI
 
 Because this is a **new** dashboard (not provisioned), the GUI **Save works cleanly** — unlike §9.2:
